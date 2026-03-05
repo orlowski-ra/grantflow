@@ -1,0 +1,420 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Grant {
+  id                String      @id @default(uuid())
+  title             String
+  slug              String      @unique
+  description       String      @db.Text
+  shortDescription  String?     @db.VarChar(500)
+  
+  // Financial
+  amountMin         Int
+  amountMax         Int
+  fundingRate       Int?        // Percentage (50 = 50%)
+  
+  // Timeline
+  deadline          DateTime
+  startDate         DateTime?
+  status            GrantStatus @default(UPCOMING)
+  
+  // Classification
+  category          String      // IT, Rolnictwo, Energia, etc.
+  subcategory       String?
+  targetGroup       String[]    // ["JDG", "Sp. z o.o.", "Startup"]
+  region            String      // Cała Polska, Mazowieckie, etc.
+  voivodeship       String?     // Specific voivodeship code
+  
+  // Source & Metadata
+  sourceType        SourceType  // EU_FUND, NATIONAL, REGIONAL, LOCAL, PRIVATE
+  sourceName        String      // "PARP", "FEnIKS", "Mazowieckie", etc.
+  sourceUrl         String
+  officialUrl       String?     // Link to official application
+  externalId        String?     // ID from external system
+  
+  // Content
+  requirements      String?     @db.Text
+  documents         Json?       // [{"name": "Wniosek", "template": "url"}]
+  faq               Json?       // Q&A pairs
+  
+  // AI/ML Fields
+  difficulty        Int         @default(3) // 1-5
+  popularity        Int         @default(0) // Click counter
+  successRate       Float?      // Historical success percentage
+  matchScore        Float?      // For ML ranking
+  
+  // Timestamps
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  scrapedAt         DateTime?   // Last time data was refreshed
+  
+  // Relations
+  orders            Order[]
+  favorites         Favorite[]
+  alerts            Alert[]     @relation("GrantAlerts")
+  
+  // Indexes
+  @@index([status, deadline])
+  @@index([category, targetGroup])
+  @@index([region, sourceType])
+  @@index([createdAt])
+  @@index([externalId, sourceType])
+}
+
+model User {
+  id                String    @id @default(uuid())
+  email             String    @unique
+  emailVerified     DateTime?
+  password          String    // Hashed bcrypt
+  
+  // Company Data (extracted from documents)
+  companyName       String?
+  legalForm         String?   // JDG, Sp. z o.o., etc.
+  nip               String?
+  regon             String?
+  krs               String?
+  
+  // Address
+  street            String?
+  city              String?
+  postalCode        String?
+  voivodeship       String?
+  
+  // Business Profile
+  pkdCodes          String[]  // Polish Classification of Activities
+  employeeCount     Int?
+  annualRevenue     Int?      // In PLN
+  foundingYear      Int?
+  
+  // AI Matching Profile
+  industry          String?
+  companySize       CompanySize?
+  interests         String[]  // For recommendations
+  
+  // Subscription & Billing
+  subscriptionStatus SubscriptionStatus @default(FREE)
+  subscriptionEnds  DateTime?
+  
+  // Documents (uploaded once, reused)
+  documents         Json?     // [{"type": "CEIDG", "url": "...", "uploadedAt": "..."}]
+  
+  // Settings
+  newsletterEnabled Boolean   @default(true)
+  alertEmail        String?
+  
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  lastLogin         DateTime?
+  
+  // Relations
+  orders            Order[]
+  favorites         Favorite[]
+  alerts            Alert[]
+  activities        ActivityLog[]
+  collaborators     Collaborator[]
+  comments          Comment[]
+  commentReplies    CommentReply[]
+  editHistory       EditHistory[]
+  notifications     Notification[]
+  
+  @@index([email])
+  @@index([nip])
+}
+
+model Order {
+  id                String      @id @default(uuid())
+  orderNumber       String      @unique // GF-2024-000001
+  
+  // Relations
+  userId            String
+  user              User        @relation(fields: [userId], references: [id])
+  grantId           String
+  grant             Grant       @relation(fields: [grantId], references: [id])
+  
+  // Order Details
+  status            OrderStatus @default(PENDING_PAYMENT)
+  amount            Int         @default(20000) // 200 PLN in grosze
+  currency          String      @default("PLN")
+  
+  // Payment (Open Banking / Przelewy24)
+  paymentId         String?     // External payment ID
+  paymentMethod     String?     // "P24", "OPEN_BANKING", "BLIK"
+  paymentStatus     PaymentStatus @default(PENDING)
+  paidAt            DateTime?
+  
+  // Documents
+  uploadedDocuments Json?       // User uploads
+  generatedDocuments Json?      // Auto-generated forms
+  
+  // Process Tracking
+  assignedTo        String?     // Admin/Consultant ID
+  notes             String?     @db.Text
+  internalNotes     String?     @db.Text // Not visible to customer
+  
+  // Timeline
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  completedAt       DateTime?
+  
+  // Communication
+  messages          Message[]
+  collaborators     Collaborator[]
+  invitations       Invitation[]
+  comments          Comment[]
+  editHistory       EditHistory[]
+  
+  @@index([userId, status])
+  @@index([grantId])
+  @@index([createdAt])
+}
+
+model Favorite {
+  id        String   @id @default(uuid())
+  userId    String
+  grantId   String
+  createdAt DateTime @default(now())
+  
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  grant     Grant    @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, grantId])
+  @@index([userId])
+}
+
+model Alert {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Alert Criteria
+  name        String?   // "Granty IT dla startupów"
+  categories  String[]
+  regions     String[]
+  minAmount   Int?
+  maxAmount   Int?
+  keywords    String[]  // Full-text search
+  targetGroup String[]
+  
+  // Notification Settings
+  email       String
+  frequency   AlertFrequency @default(DAILY)
+  lastSent    DateTime?
+  isActive    Boolean   @default(true)
+  
+  createdAt   DateTime  @default(now())
+  
+  // Matched grants (history)
+  matchedGrants Grant[] @relation("GrantAlerts")
+  
+  @@index([userId, isActive])
+}
+
+model ActivityLog {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  action      String   // "VIEW_GRANT", "SEARCH", "ORDER_CREATED", etc.
+  metadata    Json?    // Additional context
+  
+  ipAddress   String?
+  userAgent   String?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([userId, action])
+  @@index([createdAt])
+}
+
+model Message {
+  id          String   @id @default(uuid())
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  
+  senderType  String   // "USER", "ADMIN", "SYSTEM"
+  senderId    String?
+  content     String   @db.Text
+  attachments Json?    // File URLs
+  
+  isRead      Boolean  @default(false)
+  readAt      DateTime?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([orderId, createdAt])
+}
+
+model ScrapingLog {
+  id          String   @id @default(uuid())
+  source      String   // "PARP", "FEnIKS", etc.
+  status      String   // "SUCCESS", "ERROR", "PARTIAL"
+  itemsFound  Int?
+  itemsAdded  Int?
+  itemsUpdated Int?
+  errors      Json?    // Array of error messages
+  duration    Int?     // In seconds
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([source, createdAt])
+}
+
+// Enums
+enum GrantStatus {
+  ACTIVE
+  CLOSED
+  UPCOMING
+  SUSPENDED
+}
+
+enum SourceType {
+  EU_FUND
+  NATIONAL
+  REGIONAL
+  LOCAL
+  PRIVATE
+  INTERNATIONAL
+}
+
+enum CompanySize {
+  MICRO      // < 10 employees
+  SMALL      // 10-49
+  MEDIUM     // 50-249
+  LARGE      // >= 250
+}
+
+enum SubscriptionStatus {
+  FREE
+  BASIC
+  PRO
+  ENTERPRISE
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAYMENT_FAILED
+  DOCS_REQUIRED
+  IN_PROGRESS
+  UNDER_REVIEW
+  SUBMITTED
+  APPROVED
+  REJECTED
+  COMPLETED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum AlertFrequency {
+  IMMEDIATE
+  DAILY
+  WEEKLY
+}
+
+// Multi-User Collaboration Models
+model Collaborator {
+  id           String   @id @default(uuid())
+  orderId      String
+  order        Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role         String   // 'owner', 'admin', 'editor', 'viewer'
+  joinedAt     DateTime @default(now())
+  lastActiveAt DateTime @default(now())
+
+  @@unique([orderId, userId])
+  @@index([orderId])
+  @@index([userId])
+}
+
+model Invitation {
+  id        String    @id @default(uuid())
+  orderId   String
+  email     String
+  role      String
+  invitedBy String
+  token     String    @unique
+  used      Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+
+  @@index([orderId])
+  @@index([token])
+}
+
+model Comment {
+  id        String    @id @default(uuid())
+  orderId   String
+  order     Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  section   String    // 'budget', 'description', etc.
+  field     String?   // specific field name
+  content   String    @db.Text
+  resolved  Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  replies   CommentReply[]
+
+  @@index([orderId])
+  @@index([userId])
+}
+
+model CommentReply {
+  id        String    @id @default(uuid())
+  commentId String
+  comment   Comment   @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  userId    String
+  content   String
+  createdAt DateTime  @default(now())
+
+  @@index([commentId])
+}
+
+model EditHistory {
+  id        String   @id @default(uuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  section   String
+  field     String
+  oldValue  String   @db.Text
+  newValue  String   @db.Text
+  timestamp DateTime @default(now())
+
+  @@index([orderId])
+  @@index([userId])
+  @@index([timestamp])
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  title     String
+  message   String
+  link      String?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([read])
+}

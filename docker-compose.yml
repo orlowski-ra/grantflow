@@ -1,0 +1,179 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: grantflow-app
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://postgres:${DB_PASSWORD}@db:5432/grantflow
+      - NEXTAUTH_URL=https://${DOMAIN}
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - NEXT_PUBLIC_API_URL=https://${DOMAIN}/api
+      
+      # Payment Providers
+      - PRZELEWY24_MERCHANT_ID=${P24_MERCHANT_ID}
+      - PRZELEWY24_API_KEY=${P24_API_KEY}
+      - PRZELEWY24_CRC=${P24_CRC}
+      
+      # Open Banking (if used)
+      - OPEN_BANKING_CLIENT_ID=${OB_CLIENT_ID}
+      - OPEN_BANKING_CLIENT_SECRET=${OB_CLIENT_SECRET}
+      
+      # Search
+      - MEILISEARCH_HOST=http://meilisearch:7700
+      - MEILISEARCH_API_KEY=${MEILI_MASTER_KEY}
+      
+      # AI/ML
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      
+      # Email
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      
+      # Monitoring
+      - SENTRY_DSN=${SENTRY_DSN}
+    depends_on:
+      db:
+        condition: service_healthy
+      meilisearch:
+        condition: service_started
+    networks:
+      - grantflow-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  db:
+    image: postgres:15-alpine
+    container_name: grantflow-db
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backups:/backups
+      - ./scripts/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=grantflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d grantflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - grantflow-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
+  meilisearch:
+    image: getmeilisearch/meilisearch:v1.6
+    container_name: grantflow-search
+    restart: unless-stopped
+    volumes:
+      - meili_data:/meili_data
+    environment:
+      - MEILI_MASTER_KEY=${MEILI_MASTER_KEY}
+      - MEILI_NO_ANALYTICS=true
+      - MEILI_MAX_INDEX_SIZE=10Gb
+    networks:
+      - grantflow-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  redis:
+    image: redis:7-alpine
+    container_name: grantflow-cache
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - grantflow-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: grantflow-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      - app
+    networks:
+      - grantflow-network
+
+  # Scraping workers (separate from main app)
+  scraper:
+    build:
+      context: ./scrapers
+      dockerfile: Dockerfile.scraper
+    container_name: grantflow-scraper
+    restart: "no" # Run on-demand via cron or manually
+    environment:
+      - DATABASE_URL=postgresql://postgres:${DB_PASSWORD}@db:5432/grantflow
+      - MEILISEARCH_HOST=http://meilisearch:7700
+      - MEILISEARCH_API_KEY=${MEILI_MASTER_KEY}
+      - SCRAPER_API_KEY=${SCRAPER_API_KEY}
+    depends_on:
+      - db
+      - meilisearch
+    networks:
+      - grantflow-network
+    profiles:
+      - scraping
+
+  # Backup service
+  backup:
+    image: offen/docker-volume-backup:v2
+    container_name: grantflow-backup
+    restart: unless-stopped
+    environment:
+      - BACKUP_CRON_EXPRESSION=0 3 * * *
+      - BACKUP_RETENTION_DAYS=30
+      - BACKUP_FILENAME=grantflow-backup-%Y-%m-%dT%H-%M-%S.tar.gz
+      - AWS_S3_BUCKET_NAME=${BACKUP_S3_BUCKET}
+      - AWS_ACCESS_KEY_ID=${BACKUP_AWS_KEY}
+      - AWS_SECRET_ACCESS_KEY=${BACKUP_AWS_SECRET}
+      - AWS_DEFAULT_REGION=eu-central-1
+    volumes:
+      - postgres_data:/backup/data:ro
+      - meili_data:/backup/search:ro
+    networks:
+      - grantflow-network
+
+volumes:
+  postgres_data:
+    driver: local
+  meili_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  grantflow-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
